@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#111418">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<title>Mantis DIY</title>
+<style>
+:root{--bg:#111418;--card:#1b2026;--fg:#e8eaed;--mut:#8a939e;--acc:#ff9f1c;--yaw:#4dabf7;--pit:#69db7c;--red:#ff6b6b;--grid:#2c333b;--pre:#7d8590;--jerk:#c084fc}
+*{box-sizing:border-box}
+body{margin:0 auto;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,sans-serif;padding:12px 16px;max-width:640px}
+header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+h1{font-size:18px;margin:0}
+#st{font-size:13px;color:var(--mut);display:flex;align-items:center}
+.conn{flex:0 0 auto;padding:7px 12px;margin-left:10px;background:var(--acc);color:#111;font-weight:600}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--red);margin-right:6px}
+.dot.ok{background:var(--pit)}
+.card{background:var(--card);border-radius:12px;padding:12px;margin-bottom:12px}
+#res{display:flex;justify-content:space-around;text-align:center}
+#res .v{font-size:34px;font-weight:700;font-variant-numeric:tabular-nums}
+#res .l{font-size:12px;color:var(--mut)}
+#msg{text-align:center;color:var(--acc);min-height:1.4em;margin-top:6px}
+canvas{width:100%;display:block}
+.btns{display:flex;gap:8px;margin-top:8px}
+button{flex:1;padding:11px;border:0;border-radius:8px;background:#2f3943;color:var(--fg);font-size:15px}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+td,th{padding:6px;text-align:center;border-bottom:1px solid var(--grid)}
+th{color:var(--mut);font-weight:500;font-size:13px}
+tr.sel{background:#26303a}
+#stats{display:flex;justify-content:space-around;color:var(--mut);margin-bottom:6px}
+summary{font-weight:600}
+.row{display:flex;justify-content:space-between;align-items:center;margin:10px 0;gap:8px}
+input,select{background:#0d1014;color:var(--fg);border:1px solid var(--grid);border-radius:6px;padding:6px;font-size:15px;width:110px}
+.mon{font-family:ui-monospace,monospace;font-size:13px;color:var(--mut);margin-top:8px}
+</style></head><body>
+<header><h1>Mantis DIY</h1><div id="st"><span class="dot" id="dot"></span><span id="stt">Déconnecté</span><button id="bConn" class="conn">Connecter</button></div></header>
+
+<div class="card">
+ <div id="res">
+  <div><div class="v" id="sc">–</div><div class="l">score</div></div>
+  <div><div class="v" id="mv">–</div><div class="l">MOA / 100 ms</div></div>
+  <div><div class="v" id="dir">–</div><div class="l">direction</div></div>
+ </div>
+ <div id="msg"></div>
+</div>
+<div class="card">
+ <div class="row" style="margin:0 0 8px"><b>Visée en direct</b><span>échelle ± <select id="sZoom" style="width:70px"></select> MOA</span></div>
+ <canvas id="cLive"></canvas>
+</div>
+<div class="card"><canvas id="cTr"></canvas></div>
+<div class="card"><canvas id="cTi"></canvas></div>
+<div class="card"><div class="btns" style="margin-top:0"><button id="bCal">Recalibrer</button><button id="bNew">Nouvelle séance</button></div></div>
+<div class="card">
+ <div id="stats"></div>
+ <table><thead><tr><th>n°</th><th>score</th><th>MOA</th><th>dir.</th><th>zone</th></tr></thead><tbody id="tb"></tbody></table>
+</div>
+<div class="card"><details><summary>Réglages</summary>
+ <div class="row"><span>Seuil de détection (g)</span><input id="iThr" type="number" step="0.1" min="0.1"></div>
+ <div class="row"><span>Sévérité du score (points par MOA)</span><input id="iK" type="number" step="1" min="1"></div>
+ <div class="row"><span>Cible (visée en direct)</span><select id="sTgt" style="width:190px"></select></div>
+ <div class="row"><span>Distance de tir (m)</span><input id="iDist" type="number" step="1" min="1"></div>
+ <div class="row"><span>Retour au centre de la visée (s)</span><input id="iTau" type="number" step="0.1" min="0.1" max="5"></div>
+ <div class="row"><span>Axe gauche / droite</span><select id="sYaw"></select></div>
+ <div class="row"><span>Axe haut / bas</span><select id="sPit"></select></div>
+ <div class="mon" id="mon"></div>
+ <div class="btns"><button id="bPk">Remettre le pic à zéro</button></div>
+</details></div>
+
+<script>
+"use strict";
+const ACC_LSB=2048, GYR_LSB=65.5, FS=1125;
+const PRE=0.6, POST=0.2, REFR=1.0, SWIN=0.10, DWIN=0.05, CAL=2.0;
+const N=4096;
+const RT=new Float64Array(N), RG=[0,1,2].map(()=>new Float32Array(N)), RJ=new Float32Array(N);
+let head=0, cnt=0;
+const $=id=>document.getElementById(id);
+
+let cfg={thr:2.5, k:10, yaw:"2,-1", pit:"1,1", zoom:5, tau:0.5, tgt:"p10", dist:10};
+// Cibles : diamètre du 10 (mm), pas entre zones (mm), diamètre du visuel noir (mm)
+const TARGETS={
+  none:{name:"Aucune"},
+  p10:{name:"Pistolet 10 m (ISSF)", d10:11.5, step:16, black:59.5},
+  p50:{name:"Pistolet 25/50 m (C50)", d10:50, step:50, black:200},
+  c10:{name:"Carabine 10 m (ISSF)", d10:0.5, step:5, black:30.5}
+};
+const mm2moa=(mm,dist)=>Math.atan(mm/1000/dist)*180/Math.PI*60;
+const moa2mm=(moa,dist)=>Math.tan(moa/60*Math.PI/180)*dist*1000;
+// Dessine la cible choisie centrée en (cx, cy) ; s = pixels par MOA
+function drawTarget(x, cx, cy, s){
+  const T=TARGETS[cfg.tgt];
+  if(!T || !T.d10) return;
+  const r=k=>mm2moa(T.d10+(10-k)*T.step, cfg.dist)/2*s;
+  const rb=mm2moa(T.black, cfg.dist)/2*s;
+  x.fillStyle="#e9e4d8"; x.beginPath(); x.arc(cx,cy,r(1),0,2*Math.PI); x.fill();
+  x.fillStyle="#141414"; x.beginPath(); x.arc(cx,cy,rb,0,2*Math.PI); x.fill();
+  x.lineWidth=1;
+  for(let k=1;k<=10;k++){
+    const rr=r(k);
+    x.strokeStyle=rr<=rb+0.5 ? "#bdbdbd" : "#3a3a3a";
+    x.beginPath(); x.arc(cx,cy,rr,0,2*Math.PI); x.stroke();
+  }
+}
+// Zone touchée pour un écart (MOA) au centre ; null si aucune cible
+function zoneOf(moa){
+  const T=TARGETS[cfg.tgt];
+  if(!T || !T.d10) return null;
+  const d=2*moa2mm(moa, cfg.dist);              // diamètre équivalent en mm
+  if(d<=T.d10) return 10;
+  return Math.max(0, 10-Math.ceil((d-T.d10)/T.step));
+}
+try{Object.assign(cfg, JSON.parse(localStorage.getItem("mantis")||"{}"));}catch(e){}
+function save(){try{localStorage.setItem("mantis", JSON.stringify(cfg));}catch(e){}}
+function axis(s){const p=s.split(",").map(Number);return {a:p[0], g:p[1]};}
+
+let state="cal", cal=[], bias=[0,0,0];
+let tOff=0, lastRaw=null, prevA=null, lastShot=-1e9, pending=null;
+let mon={j:0, pk:0, rot:[0,0,0], gaps:0, lastT:null, n:0};
+let shots=[], sel=-1, conn=false;
+// Visée en direct : intégration "à fuite" (le point revient doucement au centre, ce qui annule la dérive)
+const TRAIL=1.5;
+const BIAS_TAU=20, BIAS_STILL=1.5;   // s ; °/s
+let live={y:0, p:0, lastT:null, k:0, trail:[], off:null};
+
+function msg(t){$("msg").textContent=t;}
+function startCal(){state="cal"; cal=[]; pending=null; live.trail=[]; live.y=live.p=0; msg("Calibration : laissez le capteur immobile…");}
+function finishCal(){
+  const m=[0,0,0], s=[0,0,0];
+  for(const c of cal) for(let i=0;i<3;i++) m[i]+=c[i];
+  for(let i=0;i<3;i++) m[i]/=cal.length;
+  for(const c of cal) for(let i=0;i<3;i++) s[i]+=(c[i]-m[i])**2;
+  const noise=Math.max(...s.map(v=>Math.sqrt(v/cal.length)/GYR_LSB));
+  if(noise>1.0){cal=[]; msg("Le capteur a bougé, calibration relancée…"); return;}
+  bias=m; state="run"; prevA=null; cnt=0; lastShot=-1e9;
+  msg("Prêt (bruit gyro "+noise.toFixed(2)+" °/s)");
+}
+
+function onData(buf){
+  const dv=new DataView(buf);
+  const AY=axis(cfg.yaw), AP=axis(cfg.pit);
+  for(let o=0; o+16<=dv.byteLength; o+=16){
+    const raw=dv.getUint32(o,true);
+    if(lastRaw!==null && raw<lastRaw) tOff+=4294967296;
+    lastRaw=raw;
+    const t=(raw+tOff)*1e-6;
+    mon.n++;
+    const gr=[dv.getInt16(o+10,true), dv.getInt16(o+12,true), dv.getInt16(o+14,true)];
+    if(state==="cal"){cal.push(gr); if(cal.length>=CAL*FS) finishCal(); continue;}
+    const a=[dv.getInt16(o+4,true)/ACC_LSB, dv.getInt16(o+6,true)/ACC_LSB, dv.getInt16(o+8,true)/ACC_LSB];
+    const g=[0,1,2].map(i=>(gr[i]-bias[i])/GYR_LSB);
+    const j=prevA ? Math.hypot(a[0]-prevA[0], a[1]-prevA[1], a[2]-prevA[2]) : 0;
+    prevA=a;
+    // Suivi lent du biais du gyro (il dérive avec la température) : seulement quand l'arme
+    // est quasi immobile, puisqu'en visée la rotation moyenne est nulle.
+    if(live.lastT!==null && Math.abs(g[0])<BIAS_STILL && Math.abs(g[1])<BIAS_STILL && Math.abs(g[2])<BIAS_STILL){
+      const kb=Math.min(t-live.lastT, 0.01)/BIAS_TAU;
+      for(let i=0;i<3;i++) bias[i]+=kb*(gr[i]-bias[i]);
+    }
+    if(live.lastT!==null){
+      const dt=Math.min(t-live.lastT, 0.01), d=Math.exp(-dt/cfg.tau);
+      live.y=live.y*d+AY.g*g[AY.a]*dt*60;
+      live.p=live.p*d+AP.g*g[AP.a]*dt*60;
+    }
+    live.lastT=t;
+    if(++live.k%4===0){
+      live.trail.push([t, live.y, live.p]);
+      while(live.trail.length && live.trail[0][0]<t-TRAIL-1) live.trail.shift();
+    }
+    if(mon.lastT!==null){
+      const dt=t-mon.lastT;
+      if(dt>1.5/FS) mon.gaps++;
+      for(let i=0;i<3;i++) mon.rot[i]+=g[i]*dt;
+    }
+    mon.lastT=t;
+    if(j>mon.j) mon.j=j;
+    if(j>mon.pk) mon.pk=j;
+    RT[head]=t; for(let i=0;i<3;i++) RG[i][head]=g[i]; RJ[head]=j;
+    head=(head+1)%N; if(cnt<N) cnt++;
+    if(pending===null && j>cfg.thr && t-lastShot>REFR){pending=t; lastShot=t;}
+    if(pending!==null && t>=pending+POST){shot(pending); pending=null;}
+  }
+}
+
+function shot(p){
+  const Y=axis(cfg.yaw), P=axis(cfg.pit);
+  const t=[], wy=[], wp=[], jj=[];
+  for(let i=0;i<cnt;i++){
+    const k=(head-cnt+i+N)%N, tt=RT[k];
+    if(tt<p-PRE || tt>p+POST) continue;
+    t.push(tt-p); wy.push(Y.g*RG[Y.a][k]); wp.push(P.g*RG[P.a][k]); jj.push(RJ[k]);
+  }
+  const n=t.length;
+  if(n<10) return;
+  const yaw=new Float64Array(n), pit=new Float64Array(n);
+  let k0=0, kd=0, b0=1e9, bd=1e9;
+  for(let i=0;i<n;i++){
+    const dt=i ? t[i]-t[i-1] : 0;
+    yaw[i]=(i?yaw[i-1]:0)+wy[i]*dt*60;     // degrés -> MOA
+    pit[i]=(i?pit[i-1]:0)+wp[i]*dt*60;
+    if(Math.abs(t[i])<b0){b0=Math.abs(t[i]); k0=i;}
+    if(Math.abs(t[i]+DWIN)<bd){bd=Math.abs(t[i]+DWIN); kd=i;}
+  }
+  const y0=yaw[k0], p0=pit[k0];
+  for(let i=0;i<n;i++){yaw[i]-=y0; pit[i]-=p0;}
+  let path=0;
+  for(let i=1;i<n;i++) if(t[i-1]>=-SWIN && t[i]<=0) path+=Math.hypot(yaw[i]-yaw[i-1], pit[i]-pit[i-1]);
+  const score=Math.max(0, 100-cfg.k*path);
+  const dx=yaw[k0]-yaw[kd], dy=pit[k0]-pit[kd];
+  const ang=(Math.atan2(dx,dy)*180/Math.PI+360)%360;
+  let hr=Math.round(ang/30)%12; if(hr===0) hr=12;
+  // point de visée moyen entre -400 et -100 ms : centre de la cible sur le graphique
+  let my=0, mp=0, nm=0;
+  for(let i=0;i<n;i++) if(t[i]>=-0.4 && t[i]<=-0.1){my+=yaw[i]; mp+=pit[i]; nm++;}
+  if(nm){my/=nm; mp/=nm;}
+  const zone=zoneOf(Math.hypot(my,mp));
+  shots.push({n:shots.length+1, t, yaw, pit, j:jj, score, path, hr, thr:cfg.thr, my, mp, zone});
+  show(shots.length-1);
+}
+
+// ---------- Dessin ----------
+const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+function setupCanvas(c, ratio){
+  const w=c.clientWidth, h=Math.round(w*ratio), d=window.devicePixelRatio||1;
+  c.width=w*d; c.height=h*d; c.style.height=h+"px";
+  const x=c.getContext("2d"); x.setTransform(d,0,0,d,0,0);
+  return {x, w, h};
+}
+function niceStep(r){
+  const raw=r/4, p=Math.pow(10, Math.floor(Math.log10(raw))), f=raw/p;
+  return (f<1.5?1:f<3.5?2:f<7.5?5:10)*p;
+}
+function drawEmpty(){
+  for(const [id,ratio] of [["cTr",1],["cTi",0.6]]){
+    const {x,w,h}=setupCanvas($(id), ratio);
+    x.fillStyle=css("--mut"); x.font="14px system-ui"; x.textAlign="center";
+    x.fillText("En attente d'un coup", w/2, h/2);
+  }
+}
+function drawTraj(r){
+  const {x,w,h}=setupCanvas($("cTr"), 1);
+  let lim=2;
+  for(let i=0;i<r.t.length;i++) if(r.t[i]>=-0.3 && r.t[i]<=0) lim=Math.max(lim, 1.2*Math.abs(r.yaw[i]), 1.2*Math.abs(r.pit[i]));
+  lim=Math.max(lim, 1.2*Math.abs(r.my), 1.2*Math.abs(r.mp));
+  const c=w/2, s=(w/2-14)/lim, X=v=>c+v*s, Y=v=>c-v*s, st=niceStep(lim);
+  x.strokeStyle=css("--grid"); x.lineWidth=1;
+  for(let v=-Math.floor(lim/st)*st; v<=lim+1e-9; v+=st){
+    x.beginPath(); x.moveTo(X(v),0); x.lineTo(X(v),h); x.moveTo(0,Y(v)); x.lineTo(w,Y(v)); x.stroke();
+  }
+  drawTarget(x, X(r.my), Y(r.mp), s);
+  x.fillStyle=css("--mut"); x.font="11px system-ui";
+  x.textAlign="left"; x.fillText("carreau : "+st+" MOA"+(r.zone!==null ? " · zone estimée : "+r.zone : ""), 6, h-6); x.fillText("↑ haut", c+4, 12);
+  x.textAlign="right"; x.fillText("droite →", w-4, c-4);
+  const seg=(f,col,lw,dash)=>{
+    x.strokeStyle=col; x.lineWidth=lw; x.setLineDash(dash||[]); x.beginPath();
+    let on=false;
+    for(let i=0;i<r.t.length;i++){
+      if(!f(r.t[i])){on=false; continue;}
+      if(!on){x.moveTo(X(r.yaw[i]),Y(r.pit[i])); on=true;} else x.lineTo(X(r.yaw[i]),Y(r.pit[i]));
+    }
+    x.stroke(); x.setLineDash([]);
+  };
+  seg(t=>t<=0, css("--pre"), 1);
+  seg(t=>t>=0, css("--yaw"), 1, [4,4]);
+  seg(t=>t>=-SWIN && t<=0, css("--acc"), 3);
+  const o=X(0), q=Y(0);
+  x.strokeStyle=css("--red"); x.lineWidth=2.5; x.beginPath();
+  x.moveTo(o-7,q-7); x.lineTo(o+7,q+7); x.moveTo(o+7,q-7); x.lineTo(o-7,q+7); x.stroke();
+}
+function drawTime(r){
+  const {x,w,h}=setupCanvas($("cTi"), 0.6);
+  const L=36, R=w-6, T=8, H1=Math.round(h*0.62), J0=H1+14, J1=h-18;
+  const tx=v=>L+(v+PRE)/(PRE+POST)*(R-L);
+  let mn=-1, mx=1;
+  for(let i=0;i<r.t.length;i++){ if(r.t[i]>0) continue; mn=Math.min(mn,r.yaw[i],r.pit[i]); mx=Math.max(mx,r.yaw[i],r.pit[i]); }
+  const ty=v=>T+(mx-v)/(mx-mn)*(H1-T);
+  let jm=r.thr*1.5; for(const v of r.j) jm=Math.max(jm,v);
+  const tj=v=>J1-Math.min(v,jm)/jm*(J1-J0);
+
+  x.fillStyle="rgba(255,159,28,0.15)"; x.fillRect(tx(-SWIN), T, tx(0)-tx(-SWIN), J1-T);
+  x.strokeStyle=css("--grid"); x.lineWidth=1; x.beginPath();
+  x.moveTo(L,ty(0)); x.lineTo(R,ty(0)); x.moveTo(L,J1); x.lineTo(R,J1); x.stroke();
+  x.fillStyle=css("--mut"); x.font="11px system-ui"; x.textAlign="right";
+  x.fillText(mx.toFixed(1), L-4, T+8); x.fillText(mn.toFixed(1), L-4, H1); x.fillText("MOA", L-4, (T+H1)/2);
+  x.fillText("g", L-4, (J0+J1)/2);
+  x.textAlign="center";
+  for(let v=-600; v<=200; v+=200) x.fillText((v>0?"+":"")+v, tx(v/1000), h-4);
+
+  const line=(arr,f,col,lw)=>{
+    x.strokeStyle=col; x.lineWidth=lw; x.beginPath();
+    for(let i=0;i<r.t.length;i++){ const px=tx(r.t[i]), py=f(arr[i]); if(i) x.lineTo(px,py); else x.moveTo(px,py); }
+    x.stroke();
+  };
+  x.save(); x.beginPath(); x.rect(L,T,R-L,H1-T); x.clip();
+  line(r.yaw, ty, css("--yaw"), 1.5);
+  line(r.pit, ty, css("--pit"), 1.5);
+  x.restore();
+  line(r.j, tj, css("--jerk"), 1);
+  x.strokeStyle=css("--red"); x.setLineDash([4,4]); x.beginPath(); x.moveTo(L,tj(r.thr)); x.lineTo(R,tj(r.thr)); x.stroke(); x.setLineDash([]);
+  x.beginPath(); x.moveTo(tx(0),T); x.lineTo(tx(0),J1); x.stroke();
+
+  x.textAlign="left"; x.font="12px system-ui";
+  x.fillStyle=css("--yaw"); x.fillText("gauche/droite", L+6, T+12);
+  x.fillStyle=css("--pit"); x.fillText("haut/bas", L+100, T+12);
+  x.fillStyle=css("--jerk"); x.fillText("saut d'accél.", L+6, J0+10);
+}
+
+// ---------- Visée en direct (60 images/s) ----------
+let lc=null, lw=0, lh=0;
+function sizeLive(){
+  const c=$("cLive"), w=c.clientWidth;
+  if(lc && w===lw) return;
+  const h=Math.round(w*0.8), d=window.devicePixelRatio||1;
+  c.width=w*d; c.height=h*d; c.style.height=h+"px";
+  lc=c.getContext("2d"); lc.setTransform(d,0,0,d,0,0); lw=w; lh=h;
+}
+// La liaison sans fil livre les données par rafales : on les rejoue avec un léger retard (DELAY)
+// à l'horloge du téléphone, pour un mouvement régulier.
+const DELAY=0.15;
+let COL=null, fps={n:0, t0:0, v:0}, pkt={last:0, gap:0, v:0};
+function drawLive(){
+  requestAnimationFrame(drawLive);
+  if(!COL){COL={}; for(const n of ["--grid","--mut","--acc","--red"]) COL[n]=css(n);}
+  sizeLive();
+  const now=performance.now();
+  fps.n++; if(now-fps.t0>=1000){fps.v=fps.n; fps.n=0; fps.t0=now; pkt.v=pkt.gap; pkt.gap=0;}
+  const x=lc, w=lw, h=lh, lim=cfg.zoom;
+  const cx=w/2, cy=h/2, s=(Math.min(w,h)/2-10)/lim, X=v=>cx+v*s, Y=v=>cy-v*s;
+  x.clearRect(0,0,w,h);
+  const st=niceStep(lim), mxv=(w/2)/s, myv=(h/2)/s;
+  x.strokeStyle=COL["--grid"]; x.lineWidth=1; x.beginPath();
+  for(let v=-Math.floor(mxv/st)*st; v<=mxv; v+=st){ x.moveTo(X(v),0); x.lineTo(X(v),h); }
+  for(let v=-Math.floor(myv/st)*st; v<=myv; v+=st){ x.moveTo(0,Y(v)); x.lineTo(w,Y(v)); }
+  x.stroke();
+  x.strokeStyle=COL["--mut"]; x.beginPath(); x.moveTo(cx,0); x.lineTo(cx,h); x.moveTo(0,cy); x.lineTo(w,cy); x.stroke();
+  const T=TARGETS[cfg.tgt];
+  drawTarget(x, cx, cy, s);
+  x.fillStyle=COL["--mut"]; x.font="11px system-ui"; x.textAlign="left";
+  x.fillText((T && T.d10) ? T.name+" à "+cfg.dist+" m" : "carreau : "+st+" MOA", 6, h-6);
+  x.textAlign="right";
+  x.fillText(fps.v+" img/s · rafales max "+pkt.v.toFixed(0)+" ms", w-6, h-6);
+
+  const tr=live.trail;
+  if(!(state==="run" && conn && tr.length>1 && live.off!==null)){
+    x.textAlign="center"; x.font="14px system-ui";
+    x.fillText(state==="cal" ? "Calibration…" : "En attente des données", cx, cy-10);
+    return;
+  }
+  // instant rejoué, en temps capteur
+  let tp=now/1000-live.off-DELAY;
+  if(tp>tr[tr.length-1][0]) tp=tr[tr.length-1][0];
+  // dernier point <= tp, et interpolation vers le suivant
+  let k=tr.length-1; while(k>0 && tr[k][0]>tp) k--;
+  let cyv=tr[k][1], cpv=tr[k][2];
+  if(k<tr.length-1){
+    const a=tr[k], b=tr[k+1], f=(tp-a[0])/(b[0]-a[0]||1);
+    cyv=a[1]+(b[1]-a[1])*f; cpv=a[2]+(b[2]-a[2])*f;
+  }
+  // traînée en 8 tranches d'âge (8 tracés seulement, léger pour un téléphone modeste)
+  x.strokeStyle=COL["--acc"]; x.lineWidth=2;
+  let band=-1, started=false;
+  for(let i=0;i<=k;i++){
+    const age=tp-tr[i][0];
+    if(age>TRAIL) continue;
+    const b=Math.min(7, Math.floor((1-age/TRAIL)*8));
+    if(b!==band){
+      if(started){ x.lineTo(X(tr[i][1]),Y(tr[i][2])); x.stroke(); }
+      band=b; x.globalAlpha=0.1+0.9*(b+1)/8; x.beginPath(); x.moveTo(X(tr[i][1]),Y(tr[i][2])); started=true;
+    } else x.lineTo(X(tr[i][1]),Y(tr[i][2]));
+  }
+  if(started){ x.lineTo(X(cyv),Y(cpv)); x.stroke(); }
+  x.globalAlpha=1;
+  const px=Math.max(6,Math.min(w-6,X(cyv))), py=Math.max(6,Math.min(h-6,Y(cpv)));
+  x.fillStyle=(px!==X(cyv) || py!==Y(cpv)) ? COL["--red"] : COL["--acc"];
+  x.beginPath(); x.arc(px,py,6,0,2*Math.PI); x.fill();
+}
+
+function show(i){
+  sel=i; const r=shots[i];
+  $("sc").textContent=r.score.toFixed(0);
+  $("mv").textContent=r.path.toFixed(1);
+  $("dir").textContent=r.hr+" h";
+  drawTraj(r); drawTime(r); table();
+}
+function table(){
+  $("tb").innerHTML=shots.map((r,i)=>`<tr data-i="${i}" class="${i===sel?"sel":""}"><td>${r.n}</td><td>${r.score.toFixed(0)}</td><td>${r.path.toFixed(1)}</td><td>${r.hr} h</td><td>${r.zone===null?"–":r.zone}</td></tr>`).reverse().join("");
+  if(shots.length){
+    const s=shots.map(r=>r.score);
+    $("stats").innerHTML=`<span>${s.length} coup${s.length>1?"s":""}</span><span>moyenne ${(s.reduce((a,b)=>a+b,0)/s.length).toFixed(0)}</span><span>meilleur ${Math.max(...s).toFixed(0)}</span>`;
+  } else $("stats").innerHTML="<span>Aucun coup</span>";
+}
+
+// ---------- Réglages et surveillance ----------
+const opts=[]; for(const a of [0,1,2]) for(const g of [1,-1]) opts.push([a+","+g, "XYZ"[a]+(g>0?" +":" −")]);
+for(const id of ["sYaw","sPit"]) $(id).innerHTML=opts.map(o=>`<option value="${o[0]}">${o[1]}</option>`).join("");
+$("sZoom").innerHTML=[1,2,5,10,20,50].map(v=>`<option value="${v}">${v}</option>`).join("");
+$("sZoom").value=cfg.zoom;
+$("sZoom").onchange=e=>{cfg.zoom=parseFloat(e.target.value)||5; save();};
+$("sTgt").innerHTML=Object.keys(TARGETS).map(k=>`<option value="${k}">${TARGETS[k].name}</option>`).join("");
+$("sTgt").value=cfg.tgt;
+$("sTgt").onchange=e=>{cfg.tgt=e.target.value; save();};
+$("iDist").value=cfg.dist;
+$("iDist").onchange=e=>{cfg.dist=Math.max(1, parseFloat(e.target.value)||10); save();};
+$("iTau").value=cfg.tau;
+$("iTau").onchange=e=>{cfg.tau=Math.max(0.1, parseFloat(e.target.value)||0.5); save();};
+$("iThr").value=cfg.thr; $("iK").value=cfg.k; $("sYaw").value=cfg.yaw; $("sPit").value=cfg.pit;
+$("iThr").onchange=e=>{cfg.thr=parseFloat(e.target.value)||2.5; save();};
+$("iK").onchange=e=>{cfg.k=parseFloat(e.target.value)||10; save();};
+$("sYaw").onchange=e=>{cfg.yaw=e.target.value; save();};
+$("sPit").onchange=e=>{cfg.pit=e.target.value; save();};
+$("bCal").onclick=startCal;
+$("bNew").onclick=()=>{shots=[]; sel=-1; table(); drawEmpty(); $("sc").textContent=$("mv").textContent=$("dir").textContent="–";};
+$("bPk").onclick=()=>{mon.pk=0;};
+$("tb").onclick=e=>{const tr=e.target.closest("tr"); if(tr) show(+tr.dataset.i);};
+// Chrome Android declenche "resize" quand la barre d'adresse se replie au defilement :
+// on ne redessine que si la largeur change vraiment (rotation de l'ecran), sinon saccades.
+let lastW=0;
+window.addEventListener("resize", ()=>{
+  const w=$("cTr").clientWidth;
+  if(w===lastW) return;
+  lastW=w;
+  if(sel>=0) show(sel); else drawEmpty();
+});
+
+const f2=v=>(v>=0?"+":"")+v.toFixed(2);
+setInterval(()=>{
+  $("stt").textContent=conn ? "Connecté · "+(mon.n*2)+" Hz" : "Déconnecté";
+  $("mon").innerHTML=`jerk max (0,5 s) : ${mon.j.toFixed(2)} g · pic : ${mon.pk.toFixed(2)} g<br>`+
+    `rotation sur 0,5 s (°) : X ${f2(mon.rot[0])}  Y ${f2(mon.rot[1])}  Z ${f2(mon.rot[2])}<br>trames perdues : ${mon.gaps}<br>`+
+    `biais gyro (°/s) : X ${f2(bias[0]/GYR_LSB)}  Y ${f2(bias[1]/GYR_LSB)}  Z ${f2(bias[2]/GYR_LSB)}`;
+  mon.j=0; mon.rot=[0,0,0]; mon.gaps=0; mon.n=0;
+}, 500);
+
+// ---------- Bluetooth (Web Bluetooth) ----------
+const SVC="4d616e74-6973-4449-5900-000000000001";
+const CHR="4d616e74-6973-4449-5900-000000000002";
+let dev=null, wantConn=false;
+
+function resetStream(){
+  lastRaw=null; tOff=0; prevA=null; mon.lastT=null; cnt=0; lastShot=-1e9; pending=null;
+  live.lastT=null; live.trail=[]; live.y=live.p=0; live.off=null; pkt.last=0;
+}
+function setConn(v){
+  conn=v; $("dot").classList.toggle("ok", v);
+  $("bConn").textContent=v ? "Déconnecter" : "Connecter";
+}
+async function bleConnect(){
+  if(!navigator.bluetooth){ msg("Bluetooth web indisponible : utilisez Chrome sur Android."); return; }
+  try{
+    if(!dev){
+      dev=await navigator.bluetooth.requestDevice({filters:[{services:[SVC]},{name:"Mantis"}], optionalServices:[SVC]});
+      dev.addEventListener("gattserverdisconnected", onDisc);
+    }
+    msg("Connexion…");
+    const srv=await dev.gatt.connect();
+    const chr=await (await srv.getPrimaryService(SVC)).getCharacteristic(CHR);
+    chr.addEventListener("characteristicvaluechanged", onNotify);
+    await chr.startNotifications();
+    resetStream(); setConn(true); keepAwake();
+    msg(state==="cal" ? "Calibration : laissez le capteur immobile…" : "Connecté");
+  }catch(e){
+    setConn(false);
+    msg("Échec de la connexion : "+e.message);
+    if(wantConn && dev) setTimeout(()=>{ if(wantConn && !conn) bleConnect(); }, 2000);
+  }
+}
+function onDisc(){
+  setConn(false);
+  if(wantConn){ msg("Liaison perdue, reconnexion…"); setTimeout(()=>{ if(wantConn) bleConnect(); }, 1000); }
+}
+$("bConn").onclick=()=>{
+  if(conn){ wantConn=false; try{dev.gatt.disconnect();}catch(e){} }
+  else { wantConn=true; bleConnect(); }
+};
+
+// Paquet : t0 (uint32) puis N x [t_lo (uint16), ax ay az gx gy gz (int16)]
+// converti au format 16 octets par mesure attendu par onData().
+function onNotify(e){
+  const v=e.target.value, n=performance.now();
+  if(pkt.last) pkt.gap=Math.max(pkt.gap, n-pkt.last);
+  pkt.last=n;
+  const ns=Math.floor((v.byteLength-4)/14);
+  if(ns<=0) return;
+  const t0=v.getUint32(0,true);
+  const out=new DataView(new ArrayBuffer(ns*16));
+  for(let i=0;i<ns;i++){
+    const o=4+i*14, lo=v.getUint16(o,true);
+    out.setUint32(i*16, (t0+((lo-(t0&0xFFFF))&0xFFFF))>>>0, true);
+    for(let k=0;k<6;k++) out.setInt16(i*16+4+2*k, v.getInt16(o+2+2*k,true), true);
+  }
+  onData(out.buffer);
+  if(lastRaw!==null){
+    const est=n/1000-(lastRaw+tOff)*1e-6;
+    if(live.off===null || est<live.off) live.off=est; else live.off+=(est-live.off)*0.002;
+  }
+}
+
+// Écran toujours allumé pendant la séance
+let wakeLock=null;
+async function keepAwake(){
+  try{ if("wakeLock" in navigator && !wakeLock){ wakeLock=await navigator.wakeLock.request("screen"); wakeLock.addEventListener("release", ()=>{wakeLock=null;}); } }catch(e){}
+}
+document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState==="visible" && conn) keepAwake(); });
+
+// Fonctionnement hors ligne
+if("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(()=>{});
+
+table(); drawEmpty(); lastW=$("cTr").clientWidth; startCal(); msg("Touchez « Connecter » pour relier le capteur"); requestAnimationFrame(drawLive);
+</script></body></html>
